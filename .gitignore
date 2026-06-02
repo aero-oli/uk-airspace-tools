@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# QGIS/runtime caches
+*.gpkg
+*.gpkg-*
+*.qgz
+*.qgs
+*.qgs~
+
+# Build/release artifacts
+dist/
+build/
+*.zip
+
+# Local environment/editor state
+.venv/
+venv/
+env/
+.env
+.env.*
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db

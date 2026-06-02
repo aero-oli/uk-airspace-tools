@@ -1,0 +1,12 @@
+[general]
+name=UK Airspace Tools
+description=Load, parse, display, filter, and inspect UK NOTAMs and permanent airspace data in QGIS.
+version=0.1.0
+qgisMinimumVersion=3.22
+author=Oliver
+email=
+about=UK Airspace Tools visualises UK NOTAM and permanent airspace information in QGIS, including filters and cross-section inspection. It is not a replacement for official briefing or operational flight planning.
+category=Vector
+icon=
+experimental=True
+deprecated=False
