@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish plugin release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read and verify version
+        id: version
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+
+          metadata = Path("uk_airspace_tools/metadata.txt").read_text(encoding="utf-8")
+          version = None
+          for line in metadata.splitlines():
+              if line.startswith("version="):
+                  version = line.split("=", 1)[1].strip()
+                  break
+
+          if not version:
+              raise SystemExit("Could not find version= in uk_airspace_tools/metadata.txt")
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          expected_tag = f"v{version}"
+          if tag != expected_tag:
+              raise SystemExit(f"Tag {tag} does not match plugin version {version}; expected {expected_tag}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"version={version}\n")
+              output.write(f"zip_name=uk_airspace_tools-{version}.zip\n")
+
+      - name: Run unit tests
+        run: python -m unittest discover uk_airspace_tools/tests
+
+      - name: Compile package
+        run: python -m compileall -q uk_airspace_tools
+
+      - name: Build plugin zip
+        shell: pwsh
+        run: ./scripts/build-plugin-zip.ps1
+
+      - name: Rename release artifact
+        run: mv dist/uk_airspace_tools.zip "dist/${{ steps.version.outputs.zip_name }}"
+
+      - name: Extract release notes
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          version = "${{ steps.version.outputs.version }}"
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          match = re.search(
+              rf"^##\s+\[?{re.escape(version)}\]?.*?\n(?P<body>.*?)(?=^##\s+|\Z)",
+              changelog,
+              re.MULTILINE | re.DOTALL,
+          )
+          if not match:
+              raise SystemExit(f"Could not find CHANGELOG.md section for {version}")
+
+          notes = match.group("body").strip()
+          if not notes:
+              raise SystemExit(f"CHANGELOG.md section for {version} is empty")
+
+          Path("release-notes.md").write_text(notes + "\n", encoding="utf-8")
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}"
+          "dist/${{ steps.version.outputs.zip_name }}"
+          --repo "${{ github.repository }}"
+          --title "UK Airspace Tools ${{ steps.version.outputs.version }}"
+          --notes-file release-notes.md
+          --verify-tag
