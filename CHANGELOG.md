@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 - 2026-06-04
 
 - Move NOTAM and permanent-airspace refresh work into background QGIS tasks with refresh state, cancellation, and clearer failure reporting.
 - Add a parse-warning review action and richer refresh/source/status diagnostics in the dock.
