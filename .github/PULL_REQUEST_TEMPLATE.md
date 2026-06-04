@@ -3,8 +3,11 @@
 
 ## Testing
 
+- [ ] `python -m ruff check .`
+- [ ] `.\scripts\build-plugin-zip.ps1`
 - [ ] `python -m unittest discover uk_airspace_tools/tests`
-- [ ] QGIS manual test, if UI/layer behaviour changed
+- [ ] `python -m compileall -q uk_airspace_tools`
+- [ ] `scripts/qgis-smoke-test.py` and `docs/QGIS_TESTING.md` checklist, if UI/layer behaviour changed
 
 ## Safety Notes
 

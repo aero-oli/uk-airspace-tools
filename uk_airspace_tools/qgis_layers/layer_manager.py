@@ -5,15 +5,16 @@ from pathlib import Path
 
 from ..storage.schema import LAYER_NAMES
 from ..storage.static_schema import STATIC_LAYER_NAMES
-from .styles import apply_map_tip, apply_notam_style, apply_static_airspace_style
+from .styles import apply_notam_map_tip, apply_notam_style, apply_static_airspace_map_tip, apply_static_airspace_style
 
 
 class LayerManager:
     GROUP_NAME = "UK Airspace"
     STATIC_GROUP_NAME = "UK Permanent Airspace"
 
-    def __init__(self, iface):
+    def __init__(self, iface, warning_handler=None):
         self.iface = iface
+        self.warning_handler = warning_handler
 
     def load_cache_layers(self, gpkg_path: str | Path) -> dict[str, object]:
         try:
@@ -47,7 +48,7 @@ class LayerManager:
                 apply_notam_style(layer, "polygon")
             elif key == "point":
                 apply_notam_style(layer, "point")
-            apply_map_tip(layer)
+            apply_notam_map_tip(layer)
             layers[key] = layer
 
         self.apply_filters(layers)
@@ -76,6 +77,7 @@ class LayerManager:
             ("radio", STATIC_LAYER_NAMES["radio"], "Radio/transponder zones", "Radio/transponder zones"),
             ("routes", STATIC_LAYER_NAMES["routes"], "Airways/routes", "Airways/routes"),
             ("other", STATIC_LAYER_NAMES["other"], "Other permanent airspace", "Other permanent airspace"),
+            ("text_only", STATIC_LAYER_NAMES["text_only"], "Permanent airspace records without geometry", None),
         ]
         layers = {}
         for key, layer_name, display_name, category in definitions:
@@ -85,8 +87,9 @@ class LayerManager:
                 raise RuntimeError(f"Could not load layer '{layer_name}' from {gpkg_path}")
             project.addMapLayer(layer, False)
             group.addLayer(layer)
-            apply_static_airspace_style(layer, category)
-            apply_map_tip(layer)
+            if category:
+                apply_static_airspace_style(layer, category)
+            apply_static_airspace_map_tip(layer)
             layers[key] = layer
 
         self.apply_static_airspace_filters(layers)
@@ -131,12 +134,7 @@ class LayerManager:
             show_expired=show_expired,
         )
         for layer in layers.values():
-            try:
-                layer.setSubsetString(subset)
-                layer.updateExtents()
-                layer.triggerRepaint()
-            except Exception:
-                pass
+            self._apply_subset(layer, subset, "NOTAM")
 
         self._set_visible(layers.get("polygon"), show_polygons)
         self._set_visible(layers.get("point"), show_points)
@@ -171,7 +169,7 @@ class LayerManager:
             try:
                 layer.updateExtents()
             except Exception:
-                pass
+                self._warn(f"Could not update extent for layer '{self._layer_name(layer)}'.")
             layer_extent = layer.extent()
             if layer_extent and not layer_extent.isEmpty():
                 if extent is None:
@@ -202,12 +200,7 @@ class LayerManager:
             keyword=keyword,
         )
         for layer in layers.values():
-            try:
-                layer.setSubsetString(subset)
-                layer.updateExtents()
-                layer.triggerRepaint()
-            except Exception:
-                pass
+            self._apply_subset(layer, subset, "permanent airspace")
             self._set_visible(layer, show_permanent_airspace)
 
     @staticmethod
@@ -282,7 +275,19 @@ class LayerManager:
 
         keyword = keyword.strip().replace("'", "''")
         if keyword:
-            clauses.append(f"(raw_text LIKE '%{keyword}%' OR description LIKE '%{keyword}%')")
+            keyword_fields = [
+                "id",
+                "source_id",
+                "qcode",
+                "icao_location",
+                "fir",
+                "activity_group",
+                "description",
+                "raw_text",
+            ]
+            clauses.append(
+                "(" + " OR ".join(f"{field_name} LIKE '%{keyword}%'" for field_name in keyword_fields) + ")"
+            )
 
         return " AND ".join(clauses)
 
@@ -315,7 +320,12 @@ class LayerManager:
         keyword = keyword.strip().replace("'", "''")
         if keyword:
             clauses.append(
-                "(name LIKE '%{0}%' OR designator LIKE '%{0}%' OR remarks LIKE '%{0}%')".format(keyword)
+                "("
+                + " OR ".join(
+                    f"{field_name} LIKE '%{keyword}%'"
+                    for field_name in ["id", "name", "designator", "airspace_type", "category", "remarks"]
+                )
+                + ")"
             )
         return " AND ".join(clauses)
 
@@ -435,6 +445,28 @@ class LayerManager:
         tree_layer = QgsProject.instance().layerTreeRoot().findLayer(layer.id())
         if tree_layer:
             tree_layer.setItemVisibilityChecked(visible)
+
+    def _apply_subset(self, layer, subset: str, label: str) -> None:
+        try:
+            layer.setSubsetString(subset)
+            layer.updateExtents()
+            layer.triggerRepaint()
+        except Exception as exc:
+            self._warn(
+                f"Could not apply {label} filter to layer '{self._layer_name(layer)}': {exc}. "
+                f"Subset expression: {subset or '<none>'}"
+            )
+
+    def _warn(self, message: str) -> None:
+        if self.warning_handler:
+            self.warning_handler(message)
+
+    @staticmethod
+    def _layer_name(layer) -> str:
+        try:
+            return layer.name()
+        except Exception:
+            return "unknown"
 
     @staticmethod
     def _remove_group_layers(project, group) -> None:

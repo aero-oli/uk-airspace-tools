@@ -39,12 +39,15 @@ class StaticAirspaceCache:
         for key, layer_name in STATIC_LAYER_NAMES.items():
             if key in {"metadata", "warnings"}:
                 continue
-            layers[key] = self._create_feature_layer(datasource, layer_name, spatial_ref)
+            if key == "text_only":
+                layers[key] = self._create_feature_layer(datasource, layer_name, None, geom_type=ogr.wkbNone)
+            else:
+                layers[key] = self._create_feature_layer(datasource, layer_name, spatial_ref, geom_type=ogr.wkbMultiPolygon)
         warning_layer = self._create_warning_layer(datasource)
         metadata_layer = self._create_metadata_layer(datasource)
 
         for feature in features:
-            target_key = STATIC_CATEGORY_TO_LAYER.get(feature.category, "other")
+            target_key = self._target_layer_key(feature)
             self._write_feature(ogr, layers[target_key], feature)
             for warning in feature.parse_warnings:
                 self._write_warning(warning_layer, feature.id, warning)
@@ -59,10 +62,10 @@ class StaticAirspaceCache:
         datasource = None
         return self.path
 
-    def _create_feature_layer(self, datasource, name, spatial_ref):
+    def _create_feature_layer(self, datasource, name, spatial_ref, geom_type):
         from osgeo import ogr
 
-        layer = datasource.CreateLayer(name, spatial_ref, ogr.wkbPolygon)
+        layer = datasource.CreateLayer(name, spatial_ref, geom_type)
         for field_name in STATIC_ATTR_FIELDS:
             if field_name.endswith("_value") or field_name in {"lower_altitude_ft", "upper_altitude_ft"}:
                 field = ogr.FieldDefn(field_name, ogr.OFTReal)
@@ -74,6 +77,12 @@ class StaticAirspaceCache:
             layer.CreateField(field)
         return layer
 
+    @staticmethod
+    def _target_layer_key(feature: PermanentAirspaceFeature) -> str:
+        if not feature.geometry_wkt:
+            return "text_only"
+        return STATIC_CATEGORY_TO_LAYER.get(feature.category, "other")
+
     def _write_feature(self, ogr, layer, feature: PermanentAirspaceFeature) -> None:
         ogr_feature = ogr.Feature(layer.GetLayerDefn())
         for field_name in STATIC_ATTR_FIELDS:
@@ -84,6 +93,8 @@ class StaticAirspaceCache:
         if feature.geometry_wkt:
             geometry = ogr.CreateGeometryFromWkt(feature.geometry_wkt)
             if geometry is not None:
+                if geometry.GetGeometryName().upper() == "POLYGON":
+                    geometry = ogr.ForceToMultiPolygon(geometry)
                 ogr_feature.SetGeometry(geometry)
         layer.CreateFeature(ogr_feature)
         ogr_feature = None

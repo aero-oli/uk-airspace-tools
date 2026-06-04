@@ -52,7 +52,6 @@ class AirspaceCrossSectionWidget(QWidget):
         self._draw_axis(painter, chart, max_altitude)
 
         band_count = len(self.bands)
-        lane_height = max(22, min(54, int(chart.width() / max(band_count, 1) * 0.75)))
         lane_width = max(58, min(96, int(chart.width() / max(band_count, 1))))
         for index, band in enumerate(self.bands):
             x = chart.left() + index * lane_width

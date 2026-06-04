@@ -9,13 +9,15 @@ Releases are created from version tags. The tag must match the plugin version in
 3. Run the local checks:
 
    ```powershell
+   python -m ruff check .
    python -m unittest discover uk_airspace_tools/tests
    python -m compileall -q uk_airspace_tools
    .\scripts\build-plugin-zip.ps1
    ```
 
-4. Commit the release changes and push `main`.
-5. Create and push a matching tag:
+4. Run the QGIS smoke test and manual checklist in `docs/QGIS_TESTING.md`.
+5. Commit the release changes and push `main`.
+6. Create and push a matching tag:
 
    ```powershell
    git tag vX.Y.Z

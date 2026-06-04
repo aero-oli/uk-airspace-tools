@@ -25,6 +25,16 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install lint tooling
+        run: python -m pip install ruff
+
+      - name: Run lint checks
+        run: ruff check .
+
+      - name: Build plugin zip
+        shell: pwsh
+        run: ./scripts/build-plugin-zip.ps1
+
       - name: Run unit tests
         run: python -m unittest discover uk_airspace_tools/tests
 

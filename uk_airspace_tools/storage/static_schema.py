@@ -5,6 +5,7 @@ STATIC_LAYER_NAMES = {
     "radio": "radio_transponder_zones",
     "routes": "airways_routes",
     "other": "other_permanent_airspace",
+    "text_only": "permanent_airspace_text_only",
     "metadata": "metadata",
     "warnings": "parse_warnings",
 }

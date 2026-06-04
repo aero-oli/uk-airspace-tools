@@ -7,7 +7,7 @@ from pathlib import Path
 
 try:
     from qgis.PyQt.QtCore import QSettings, Qt
-    from qgis.PyQt.QtGui import QCursor
+    from qgis.PyQt.QtGui import QCursor, QIcon
     from qgis.PyQt.QtWidgets import QAction, QFileDialog, QToolTip
     from qgis.core import QgsApplication, QgsCoordinateTransform, QgsFeatureRequest, QgsGeometry, QgsMessageLog, QgsProject, QgsRectangle, Qgis
 except ImportError:  # pragma: no cover - QGIS-only plugin entrypoint.
@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - QGIS-only plugin entrypoint.
     QAction = None
     Qt = None
     QCursor = None
+    QIcon = None
     QFileDialog = None
     QToolTip = None
     QgsApplication = None
@@ -31,8 +32,7 @@ from .providers.nats_aip_dataset import NatsAipDatasetProvider
 from .providers.nats_pib_xml import DEFAULT_NATS_PIB_URL, NatsPibXmlProvider
 from .qgis_layers.identify_tool import AirspaceIdentifyTool
 from .qgis_layers.layer_manager import LayerManager
-from .storage.geopackage import GeoPackageCache
-from .storage.static_geopackage import StaticAirspaceCache
+from .tasks import AirspaceRefreshTask
 from .ui.cross_section_dialog import AirspaceCrossSectionDialog
 from .ui.dock_widget import UkAirspaceDockWidget
 
@@ -46,7 +46,7 @@ class UkAirspaceToolsPlugin:
         self.iface = iface
         self.dock = None
         self.actions = []
-        self.layer_manager = LayerManager(iface)
+        self.layer_manager = LayerManager(iface, warning_handler=self._warn)
         self.layers = {}
         self.static_layers = {}
         self.last_local_file = None
@@ -55,19 +55,36 @@ class UkAirspaceToolsPlugin:
         self.identify_tool = None
         self.cross_section_dialog = None
         self.static_isolation = None
+        self.active_refresh_task = None
+        self.latest_parse_warnings = []
 
     def initGui(self) -> None:
-        self.open_action = QAction("Open UK Airspace Panel", self.iface.mainWindow())
+        self.open_action = self._action("Open UK Airspace Panel")
         self.open_action.triggered.connect(self.open_panel)
-        self.refresh_action = QAction("Refresh NOTAMs", self.iface.mainWindow())
+        self.refresh_action = self._action("Refresh NOTAMs")
         self.refresh_action.triggered.connect(self.refresh_notams)
-        self.refresh_permanent_action = QAction("Refresh Permanent Airspace", self.iface.mainWindow())
+        self.refresh_permanent_action = self._action("Refresh Permanent Airspace")
         self.refresh_permanent_action.triggered.connect(self.refresh_permanent_airspace)
 
         for action in [self.open_action, self.refresh_action, self.refresh_permanent_action]:
             self.iface.addPluginToMenu(self.MENU_NAME, action)
             self.iface.addToolBarIcon(action)
             self.actions.append(action)
+
+    def _action(self, text: str):
+        icon = self._plugin_icon()
+        if icon is not None:
+            return QAction(icon, text, self.iface.mainWindow())
+        return QAction(text, self.iface.mainWindow())
+
+    @staticmethod
+    def _plugin_icon():
+        if QIcon is None:
+            return None
+        icon_path = Path(__file__).with_name("icon.svg")
+        if not icon_path.exists():
+            return None
+        return QIcon(str(icon_path))
 
     def unload(self) -> None:
         for action in self.actions:
@@ -77,6 +94,12 @@ class UkAirspaceToolsPlugin:
         if self.dock:
             self.iface.removeDockWidget(self.dock)
             self.dock = None
+        if self.active_refresh_task:
+            try:
+                self.active_refresh_task.cancel()
+            except Exception:
+                pass
+            self.active_refresh_task = None
         self.identify_tool = None
         self.cross_section_dialog = None
 
@@ -94,6 +117,8 @@ class UkAirspaceToolsPlugin:
             self.dock.inspectNotamsRequested.connect(self.activate_notam_inspect_mode)
             self.dock.inspectAirspaceRequested.connect(self.activate_airspace_cross_section_mode)
             self.dock.filtersChanged.connect(self.apply_filters)
+            self.dock.cancelRefreshRequested.connect(self.cancel_refresh)
+            self.dock.warningsRequested.connect(self.show_parse_warnings)
             self.iface.addDockWidget(Qt.RightDockWidgetArea, self.dock)
         self.dock.show()
         self.dock.raise_()
@@ -115,21 +140,21 @@ class UkAirspaceToolsPlugin:
                 provider = LocalFileProvider(self.last_local_file)
             else:
                 provider = NatsPibXmlProvider(self._configured_url())
-            self._refresh_from_provider(provider)
+            self._start_refresh_task("notam", provider, self._cache_path(), "Refreshing NOTAMs")
         except Exception as exc:
             self._warn(f"Refresh failed: {exc}")
 
     def load_local_file(self, file_path: str) -> None:
         self.last_local_file = file_path
         try:
-            self._refresh_from_provider(LocalFileProvider(file_path))
+            self._start_refresh_task("notam", LocalFileProvider(file_path), self._cache_path(), "Loading local NOTAM XML")
         except Exception as exc:
             self._warn(f"Local XML import failed: {exc}")
 
     def refresh_permanent_airspace(self) -> None:
         self.open_panel()
         try:
-            self._refresh_static_from_provider(NatsAipDatasetProvider())
+            self._start_refresh_task("static", NatsAipDatasetProvider(), self._static_cache_path(), "Refreshing permanent airspace")
         except Exception as exc:
             self._warn(f"Permanent airspace refresh failed: {exc}")
 
@@ -137,28 +162,45 @@ class UkAirspaceToolsPlugin:
         self.last_local_aip_file = file_path
         try:
             provider = NatsAipDatasetProvider()
-            provider.resolved_url = file_path
-            provider.source_file = Path(file_path).name
-            raw = Path(file_path).read_bytes()
-            self._refresh_static_from_provider(provider, raw=raw)
+            self._start_refresh_task(
+                "static",
+                provider,
+                self._static_cache_path(),
+                "Loading local AIP dataset",
+                raw_path=file_path,
+            )
         except Exception as exc:
             self._warn(f"Local AIP dataset import failed: {exc}")
 
     def clear_layers(self) -> None:
         self.layer_manager.clear_group()
         self.layers = {}
+        self._update_layer_action_state()
 
     def clear_permanent_airspace(self) -> None:
         self.layer_manager.clear_static_group()
         self.static_layers = {}
         self.static_isolation = None
+        self._update_layer_action_state()
 
     def clear_static_isolation(self) -> None:
         self.static_isolation = None
         self.apply_filters()
+        self._update_layer_action_state()
 
     def zoom_to_active(self) -> None:
         self.layer_manager.zoom_to_active(self.layers)
+
+    def cancel_refresh(self) -> None:
+        if self.active_refresh_task is None:
+            return
+        try:
+            self.active_refresh_task.cancel()
+            self._update_status({"refresh_status": "Cancelling refresh"})
+            if self.dock:
+                self.dock.set_refresh_state(True, "Cancelling refresh")
+        except Exception as exc:
+            self._warn(f"Could not cancel refresh: {exc}")
 
     def activate_notam_inspect_mode(self) -> None:
         self.open_panel()
@@ -231,54 +273,101 @@ class UkAirspaceToolsPlugin:
             if self.static_isolation:
                 self._apply_static_isolation()
 
-    def _refresh_from_provider(self, provider) -> None:
-        raw = provider.fetch()
-        features = provider.parse(raw)
-        metadata = provider.source_metadata()
-        metadata["raw_source_bytes"] = str(len(raw))
-        metadata["refresh_timestamp"] = datetime.now(timezone.utc).isoformat()
-
-        self.clear_layers()
-        self._release_qgis_file_handles()
-        gpkg_path = GeoPackageCache(self._cache_path()).write(features, metadata)
-        self.layers = self.layer_manager.load_cache_layers(gpkg_path)
-        self._connect_selection_handlers()
+    def _start_refresh_task(
+        self,
+        kind: str,
+        provider,
+        cache_path: Path,
+        description: str,
+        raw_path: str | None = None,
+    ) -> None:
+        if self.active_refresh_task is not None:
+            self._warn("A refresh is already running. Wait for it to finish or cancel it from QGIS task manager.")
+            return
+        task = AirspaceRefreshTask(
+            description,
+            kind=kind,
+            provider=provider,
+            cache_path=cache_path,
+            raw_path=raw_path,
+            finished_callback=self._finish_refresh_task,
+        )
+        self.active_refresh_task = task
+        self.latest_parse_warnings = []
         if self.dock:
-            self.dock.set_filter_options(self._filter_options(features))
-        self.apply_filters()
-        self.zoom_to_active()
-        self._cleanup_stale_caches(gpkg_path)
-        stats = self._stats(features)
-        self._update_status(stats)
-        warning_count = stats["warning_count"]
-        if warning_count:
-            self._info(f"Loaded {len(features)} NOTAMs with {warning_count} parse warnings.")
-        else:
-            self._info(f"Loaded {len(features)} NOTAMs.")
+            self.dock.set_refresh_state(True, description)
+            self.dock.set_warning_action_state(0)
+        self._update_status({"refresh_status": description, "source_label": self._provider_label(provider, raw_path)})
+        QgsApplication.taskManager().addTask(task)
 
-    def _refresh_static_from_provider(self, provider, raw: bytes | None = None) -> None:
-        raw = provider.fetch() if raw is None else raw
-        features = provider.parse(raw)
-        metadata = provider.source_metadata()
-        metadata["raw_source_bytes"] = str(len(raw))
-        metadata["refresh_timestamp"] = datetime.now(timezone.utc).isoformat()
-
-        self.clear_permanent_airspace()
-        self._release_qgis_file_handles()
-        gpkg_path = StaticAirspaceCache(self._static_cache_path()).write(features, metadata)
-        self.static_layers = self.layer_manager.load_static_airspace_layers(gpkg_path)
-        self._connect_selection_handlers(self.static_layers)
+    def _finish_refresh_task(self, task, result: bool) -> None:
+        if task is not self.active_refresh_task:
+            return
+        self.active_refresh_task = None
         if self.dock:
-            self.dock.set_static_filter_options(self._static_filter_options(features))
-        self.apply_filters()
-        self._cleanup_stale_caches(gpkg_path, prefix=self.STATIC_CACHE_PREFIX)
-        stats = self._static_stats(features)
-        self._update_status(stats)
-        warning_count = stats["warning_count"]
-        if warning_count:
-            self._info(f"Loaded {len(features)} permanent airspace records with {warning_count} parse warnings.")
+            self.dock.set_refresh_state(False, "Idle")
+
+        if not result:
+            if task.isCanceled():
+                self._update_status({"refresh_status": "Refresh cancelled"})
+                self._warn(f"{task.description()} cancelled.")
+                return
+            message = f"{task.description()} failed"
+            if task.error:
+                message = f"{message}: {task.error}"
+            self._update_status({"refresh_status": "Refresh failed"})
+            self._warn(message)
+            return
+
+        try:
+            self._load_completed_refresh(task)
+        except Exception as exc:
+            self._update_status({"refresh_status": "Layer load failed"})
+            self._warn(f"{task.description()} completed, but layer loading failed: {exc}")
+
+    def _load_completed_refresh(self, task) -> None:
+        if task.gpkg_path is None:
+            raise RuntimeError("Refresh task finished without a GeoPackage path.")
+
+        if task.kind == "static":
+            self.clear_permanent_airspace()
+            self._release_qgis_file_handles()
+            self.static_layers = self.layer_manager.load_static_airspace_layers(task.gpkg_path)
+            self._connect_selection_handlers(self.static_layers)
+            if self.dock:
+                self.dock.set_static_filter_options(self._static_filter_options(task.features))
+            self.apply_filters()
+            self._cleanup_stale_caches(task.gpkg_path, prefix=self.STATIC_CACHE_PREFIX)
+            stats = self._static_stats(task.features)
+            noun = "permanent airspace records"
         else:
-            self._info(f"Loaded {len(features)} permanent airspace records.")
+            self.clear_layers()
+            self._release_qgis_file_handles()
+            self.layers = self.layer_manager.load_cache_layers(task.gpkg_path)
+            self._connect_selection_handlers()
+            if self.dock:
+                self.dock.set_filter_options(self._filter_options(task.features))
+            self.apply_filters()
+            self.zoom_to_active()
+            self._cleanup_stale_caches(task.gpkg_path)
+            stats = self._stats(task.features)
+            noun = "NOTAMs"
+
+        warning_count = stats["warning_count"]
+        self.latest_parse_warnings = self._warning_records(task.kind, task.features)
+        status = {
+            **stats,
+            "refresh_status": "Refresh complete",
+            "source_label": self._metadata_source_label(task.metadata),
+        }
+        self._update_status(status)
+        self._update_layer_action_state()
+        if self.dock:
+            self.dock.set_warning_action_state(len(self.latest_parse_warnings))
+        if warning_count:
+            self._info(f"Loaded {len(task.features)} {noun} with {warning_count} parse warnings.")
+        else:
+            self._info(f"Loaded {len(task.features)} {noun}.")
 
     def _cache_path(self) -> Path:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -343,6 +432,8 @@ class UkAirspaceToolsPlugin:
     def _static_stats(features) -> dict:
         return {
             "permanent_airspace_count": len(features),
+            "permanent_polygon_count": sum(1 for feature in features if feature.geometry_wkt),
+            "permanent_text_only_count": sum(1 for feature in features if not feature.geometry_wkt),
             "permanent_category_count": len({feature.category for feature in features if feature.category}),
             "warning_count": sum(len(feature.parse_warnings) for feature in features),
         }
@@ -351,6 +442,78 @@ class UkAirspaceToolsPlugin:
         self.status_stats.update(stats)
         if self.dock:
             self.dock.set_status(self.status_stats)
+
+    def _update_layer_action_state(self) -> None:
+        if not self.dock:
+            return
+        self.dock.set_layer_action_state(
+            has_notams=bool(self.layers),
+            has_static_airspace=self._has_inspectable_static_airspace(self.static_layers, self.status_stats),
+            isolation_active=bool(self.static_isolation),
+        )
+
+    @staticmethod
+    def _has_inspectable_static_airspace(static_layers: dict, stats: dict) -> bool:
+        polygon_count = stats.get("permanent_polygon_count")
+        if polygon_count not in (None, ""):
+            try:
+                return int(polygon_count) > 0
+            except (TypeError, ValueError):
+                pass
+        return any(key != "text_only" for key in static_layers)
+
+    @staticmethod
+    def _provider_label(provider, raw_path: str | None = None) -> str:
+        if raw_path:
+            return str(raw_path)
+        try:
+            metadata = provider.source_metadata()
+        except Exception:
+            metadata = {}
+        return UkAirspaceToolsPlugin._metadata_source_label(metadata) or getattr(provider, "display_name", "Unknown source")
+
+    @staticmethod
+    def _metadata_source_label(metadata: dict) -> str:
+        for key in ("source_file", "file_path", "source_url", "resolved_url", "configured_url", "display_name"):
+            value = metadata.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    @staticmethod
+    def _warning_records(kind: str, features) -> list[dict]:
+        records = []
+        for feature in features:
+            feature_id = getattr(feature, "id", None) or getattr(feature, "designator", None) or "Unknown feature"
+            category = getattr(feature, "activity_group", None) or getattr(feature, "category", None) or ""
+            for warning in getattr(feature, "parse_warnings", []):
+                records.append(
+                    {
+                        "kind": kind,
+                        "feature_id": feature_id,
+                        "category": category,
+                        "warning": warning,
+                    }
+                )
+        return records
+
+    def show_parse_warnings(self) -> None:
+        if not self.dock:
+            return
+        if not self.latest_parse_warnings:
+            self.dock.set_feature_details("Parse warnings", "No parse warnings are available for the latest refresh.")
+            return
+
+        sections = [f"<h3>{len(self.latest_parse_warnings)} parse warning{'s' if len(self.latest_parse_warnings) != 1 else ''}</h3>"]
+        for index, record in enumerate(self.latest_parse_warnings, start=1):
+            category = f" - {record['category']}" if record["category"] else ""
+            sections.append(
+                "<p>"
+                f"<b>{index}. {html.escape(str(record['feature_id']))}</b>{html.escape(category)}<br/>"
+                f"{html.escape(str(record['warning']))}"
+                "</p>"
+            )
+        self.dock.set_feature_details("Parse warnings", "".join(sections), rich=True)
 
     def _connect_selection_handlers(self, layers=None) -> None:
         for layer in (layers or self.layers).values():
@@ -418,7 +581,7 @@ class UkAirspaceToolsPlugin:
         self._show_identify_summary_tooltip(records, title)
 
     def _inspect_layers(self) -> list:
-        layers = list(self.static_layers.values())
+        layers = [layer for key, layer in self.static_layers.items() if key != "text_only"]
         return [layer for layer in layers if self._layer_is_inspectable(layer)]
 
     def _notam_inspect_layers(self) -> list:

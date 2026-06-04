@@ -2,6 +2,7 @@ from __future__ import annotations
 
 try:
     from qgis.PyQt.QtCore import QDate, pyqtSignal
+    from qgis.PyQt.QtGui import QTextCursor
     from qgis.PyQt.QtWidgets import (
         QCheckBox,
         QComboBox,
@@ -14,6 +15,7 @@ try:
         QLabel,
         QLineEdit,
         QPushButton,
+        QScrollArea,
         QTabWidget,
         QTextEdit,
         QVBoxLayout,
@@ -47,6 +49,8 @@ class UkAirspaceDockWidget(QDockWidget):
     inspectNotamsRequested = pyqtSignal()
     inspectAirspaceRequested = pyqtSignal()
     filtersChanged = pyqtSignal()
+    cancelRefreshRequested = pyqtSignal()
+    warningsRequested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("UK Airspace Tools", parent)
@@ -88,6 +92,29 @@ class UkAirspaceDockWidget(QDockWidget):
         for key, label in self.status_labels.items():
             label.setText(str(stats.get(key, "0" if key.endswith("_count") else "")))
 
+    def set_refresh_state(self, running: bool, message: str = "") -> None:
+        self.refresh_status_label.setText(message)
+        for button in [
+            self.refresh_button,
+            self.load_file_button,
+            self.refresh_permanent_button,
+            self.load_aip_file_button,
+        ]:
+            button.setEnabled(not running)
+        self.cancel_refresh_button.setEnabled(running)
+
+    def set_layer_action_state(self, *, has_notams: bool, has_static_airspace: bool, isolation_active: bool = False) -> None:
+        self.zoom_button.setEnabled(has_notams)
+        self.inspect_notams_button.setEnabled(has_notams)
+        self.inspect_airspace_button.setEnabled(has_static_airspace)
+        self.clear_button.setEnabled(has_notams)
+        self.clear_permanent_button.setEnabled(has_static_airspace)
+        self.clear_isolation_button.setEnabled(isolation_active)
+
+    def set_warning_action_state(self, warning_count: int) -> None:
+        self.review_warnings_button.setEnabled(warning_count > 0)
+        self.review_warnings_button.setText(f"Review Parse Warnings ({warning_count})")
+
     def set_filter_options(self, options: dict) -> None:
         self._set_combo_items(self.activity_filter, [("All activity types", "all")] + [(value, value) for value in options.get("activity_groups", [])])
         self._set_combo_items(self.fir_filter, [("All FIRs", "all")] + [(value, value) for value in options.get("firs", [])])
@@ -110,10 +137,19 @@ class UkAirspaceDockWidget(QDockWidget):
             self.details_text.setHtml(details)
         else:
             self.details_text.setPlainText(details)
+        self.details_text.moveCursor(QTextCursor.Start)
+        self.details_text.setFocus()
 
     def _build_ui(self) -> None:
         container = QWidget(self)
-        layout = QVBoxLayout(container)
+        outer_layout = QVBoxLayout(container)
+
+        scroll_area = QScrollArea(container)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self.scroll_area = scroll_area
+        scroll_content = QWidget(scroll_area)
+        layout = QVBoxLayout(scroll_content)
 
         self.tabs = QTabWidget()
         notam_tab = QWidget()
@@ -156,6 +192,15 @@ class UkAirspaceDockWidget(QDockWidget):
         permanent_second_row.addWidget(self.clear_permanent_button)
         permanent_second_row.addWidget(self.clear_isolation_button)
         airspace_layout.addLayout(permanent_second_row)
+
+        refresh_control_row = QHBoxLayout()
+        self.cancel_refresh_button = QPushButton("Cancel Refresh")
+        self.cancel_refresh_button.setEnabled(False)
+        self.review_warnings_button = QPushButton("Review Parse Warnings (0)")
+        self.review_warnings_button.setEnabled(False)
+        refresh_control_row.addWidget(self.cancel_refresh_button)
+        refresh_control_row.addWidget(self.review_warnings_button)
+        layout.addLayout(refresh_control_row)
 
         form = QFormLayout()
         self.source_selector = QComboBox()
@@ -252,8 +297,6 @@ class UkAirspaceDockWidget(QDockWidget):
         self.show_text_only_notams.setChecked(True)
         self.show_expired_notams = QCheckBox("Show expired NOTAMs")
         self.show_expired_notams.setChecked(False)
-        self.show_permanent_airspace = QCheckBox("Show permanent airspace")
-        self.show_permanent_airspace.setChecked(True)
         for checkbox in [
             self.show_polygon_notams,
             self.show_point_notams,
@@ -303,7 +346,9 @@ class UkAirspaceDockWidget(QDockWidget):
         status_group = QGroupBox("Status")
         status_layout = QFormLayout(status_group)
         self.status_labels = {
+            "refresh_status": QLabel("Idle"),
             "last_refresh": QLabel(""),
+            "source_label": QLabel(""),
             "notam_count": QLabel("0"),
             "polygon_count": QLabel("0"),
             "point_count": QLabel("0"),
@@ -312,10 +357,15 @@ class UkAirspaceDockWidget(QDockWidget):
             "large_area_count": QLabel("0"),
             "activity_group_count": QLabel("0"),
             "permanent_airspace_count": QLabel("0"),
+            "permanent_polygon_count": QLabel("0"),
+            "permanent_text_only_count": QLabel("0"),
             "permanent_category_count": QLabel("0"),
             "warning_count": QLabel("0"),
         }
-        status_layout.addRow("Last refresh time", self.status_labels["last_refresh"])
+        self.refresh_status_label = self.status_labels["refresh_status"]
+        status_layout.addRow("Refresh status", self.status_labels["refresh_status"])
+        status_layout.addRow("Last refresh time (UTC)", self.status_labels["last_refresh"])
+        status_layout.addRow("Latest source", self.status_labels["source_label"])
         status_layout.addRow("Number of NOTAMs parsed", self.status_labels["notam_count"])
         status_layout.addRow("Number of polygon NOTAMs", self.status_labels["polygon_count"])
         status_layout.addRow("Number of point NOTAMs", self.status_labels["point_count"])
@@ -324,23 +374,28 @@ class UkAirspaceDockWidget(QDockWidget):
         status_layout.addRow("Large-area NOTAMs", self.status_labels["large_area_count"])
         status_layout.addRow("Activity groups", self.status_labels["activity_group_count"])
         status_layout.addRow("Permanent airspace records", self.status_labels["permanent_airspace_count"])
+        status_layout.addRow("Permanent polygon records", self.status_labels["permanent_polygon_count"])
+        status_layout.addRow("Permanent text-only records", self.status_labels["permanent_text_only_count"])
         status_layout.addRow("Permanent categories", self.status_labels["permanent_category_count"])
         status_layout.addRow("Number of parse warnings/errors", self.status_labels["warning_count"])
         layout.addWidget(status_group)
 
-        details_group = QGroupBox("Selected Airspace")
+        details_group = QGroupBox("Details")
         details_layout = QVBoxLayout(details_group)
         self.details_title = QLabel("No airspace selected")
         self.details_text = QTextEdit()
         self.details_text.setReadOnly(True)
-        self.details_text.setMinimumHeight(220)
+        self.details_text.setMinimumHeight(140)
+        self.details_text.setMaximumHeight(260)
         details_layout.addWidget(self.details_title)
         details_layout.addWidget(self.details_text)
-        layout.addWidget(details_group)
-        layout.addStretch(1)
+        outer_layout.addWidget(scroll_area, 1)
+        scroll_area.setWidget(scroll_content)
+        outer_layout.addWidget(details_group, 0)
 
         self.setWidget(container)
         self._connect_signals()
+        self.set_layer_action_state(has_notams=False, has_static_airspace=False)
 
     def _connect_signals(self) -> None:
         self.refresh_button.clicked.connect(self.refreshRequested.emit)
@@ -353,6 +408,8 @@ class UkAirspaceDockWidget(QDockWidget):
         self.zoom_button.clicked.connect(self.zoomRequested.emit)
         self.inspect_notams_button.clicked.connect(self.inspectNotamsRequested.emit)
         self.inspect_airspace_button.clicked.connect(self.inspectAirspaceRequested.emit)
+        self.cancel_refresh_button.clicked.connect(self.cancelRefreshRequested.emit)
+        self.review_warnings_button.clicked.connect(self.warningsRequested.emit)
         self.time_filter.currentIndexChanged.connect(self.filtersChanged.emit)
         self.start_date_filter.dateChanged.connect(self.filtersChanged.emit)
         self.end_date_filter.dateChanged.connect(self.filtersChanged.emit)

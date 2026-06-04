@@ -22,7 +22,7 @@ This plugin is an aid for visualisation and situational awareness only. It is no
 
 The plugin fetches public NATS/AIS datasets at runtime:
 
-- NOTAM PIB XML: `https://pibs.nats.co.uk/operational/pibs/PIB.xml`
+- NOTAM PIB XML discovery page: `https://www.nats.aero/do-it-online/pre-flight-information-bulletins/`
 - NATS digital datasets page: `https://nats-uk.ead-it.com/cms-nats/opencms/en/Publications/digital-datasets/`
 
 Dataset structures and URLs can change. Local file import is retained as a fallback.
@@ -70,7 +70,9 @@ Parser and utility tests run outside QGIS:
 python -m unittest discover uk_airspace_tools/tests
 ```
 
-The QGIS UI, map canvas integration, PyQGIS layer loading, and GDAL-backed GeoPackage writing require a QGIS Python environment for full manual testing.
+The QGIS UI, map canvas integration, PyQGIS layer loading, and GDAL-backed GeoPackage writing require a QGIS Python environment for full manual testing. Use `docs/QGIS_TESTING.md` for the manual checklist.
+
+See `docs/ARCHITECTURE.md` for the provider, parser, cache, layer, and task boundaries.
 
 ## Repository Layout
 

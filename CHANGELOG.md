@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Move NOTAM and permanent-airspace refresh work into background QGIS tasks with refresh state, cancellation, and clearer failure reporting.
+- Add a parse-warning review action and richer refresh/source/status diagnostics in the dock.
+- Add separate NOTAM and permanent-airspace map-tip templates.
+- Store permanent-airspace records without geometry in a non-spatial table instead of polygon layers.
+- Improve AIXM geometry conversion for `posList`, interior rings, multiple surfaces, multipolygons, and radius unit conversion.
+- Add a plugin icon, metadata tags, Ruff linting, architecture notes, and a QGIS manual validation checklist.
+- Add a QGIS smoke-test script for plugin imports, metadata/icon checks, and dock state checks.
+- Add provider discovery/error tests, static-cache routing tests, task-helper tests, and layer-filter diagnostics tests.
+
 ## 0.1.0
 
 Initial public release candidate.

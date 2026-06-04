@@ -73,7 +73,7 @@ def apply_static_airspace_style(layer, category: str) -> None:
     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
 
-def apply_map_tip(layer) -> None:
+def apply_notam_map_tip(layer) -> None:
     template = """
     <b>[% "id" %]</b><br/>
     Status: [% "status" %]<br/>
@@ -89,3 +89,25 @@ def apply_map_tip(layer) -> None:
         layer.setMapTipTemplate(template)
     except AttributeError:
         pass
+
+
+def apply_static_airspace_map_tip(layer) -> None:
+    template = """
+    <b>[% "name" %]</b><br/>
+    Designator: [% "designator" %]<br/>
+    Type: [% "airspace_type" %]<br/>
+    Category: [% "category" %]<br/>
+    Class: [% "airspace_class" %]<br/>
+    Activation: [% "activation_status" %]<br/>
+    Limits: [% "lower_limit_raw" %] / [% "upper_limit_raw" %]<br/>
+    Warnings: [% "parse_warning_count" %]<br/>
+    <pre>[% "remarks" %]</pre>
+    """
+    try:
+        layer.setMapTipTemplate(template)
+    except AttributeError:
+        pass
+
+
+def apply_map_tip(layer) -> None:
+    apply_notam_map_tip(layer)

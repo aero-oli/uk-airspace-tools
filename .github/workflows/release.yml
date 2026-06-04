@@ -21,6 +21,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install lint tooling
+        run: python -m pip install ruff
+
       - name: Read and verify version
         id: version
         shell: python
@@ -49,6 +52,9 @@ jobs:
 
       - name: Run unit tests
         run: python -m unittest discover uk_airspace_tools/tests
+
+      - name: Run lint checks
+        run: ruff check .
 
       - name: Compile package
         run: python -m compileall -q uk_airspace_tools

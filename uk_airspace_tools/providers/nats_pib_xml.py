@@ -54,7 +54,7 @@ class NatsPibXmlProvider(AirspaceProvider):
                     self.content_type = candidate_type
                     self.resolved_url = candidate_final
                     return candidate_raw
-            except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            except (RuntimeError, HTTPError, URLError, TimeoutError, OSError) as exc:
                 errors.append(f"{candidate}: {exc}")
 
         detail = "; ".join(errors) if errors else "No likely XML links were found on the page."
@@ -74,8 +74,13 @@ class NatsPibXmlProvider(AirspaceProvider):
 
     def _download(self, url: str) -> tuple[bytes, str | None, str]:
         request = Request(url, headers={"User-Agent": "UKAirspaceTools-QGIS/0.1"})
-        with urlopen(request, timeout=self.timeout) as response:
-            return response.read(), response.headers.get("content-type"), response.geturl()
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                return response.read(), response.headers.get("content-type"), response.geturl()
+        except HTTPError as exc:
+            raise RuntimeError(f"HTTP {exc.code} while fetching {url}") from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise RuntimeError(f"Could not fetch {url}: {exc}") from exc
 
     @staticmethod
     def _looks_like_xml(raw: bytes, content_type: str | None, url: str) -> bool:
@@ -117,4 +122,3 @@ class NatsPibXmlProvider(AirspaceProvider):
                 seen.add(url)
                 results.append(url)
         return results
-

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from html.parser import HTMLParser
 import json
 import math
@@ -9,6 +9,7 @@ import re
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from urllib.parse import urljoin
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zipfile import ZipFile
 
@@ -270,8 +271,13 @@ class NatsAipDatasetProvider:
 
     def _download(self, url: str) -> bytes:
         request = Request(url, headers={"User-Agent": "UKAirspaceTools-QGIS/0.1"})
-        with urlopen(request, timeout=self.timeout) as response:
-            return response.read()
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                return response.read()
+        except HTTPError as exc:
+            raise RuntimeError(f"HTTP {exc.code} while fetching {url}") from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise RuntimeError(f"Could not fetch {url}: {exc}") from exc
 
     @staticmethod
     def _select_zip_member(zip_file: ZipFile, suffix: str, preferred: str | None = None) -> str | None:
@@ -294,36 +300,119 @@ class NatsAipDatasetProvider:
 def _volume_geometry_wkt(volume) -> tuple[str | None, str, list[str]]:
     if volume is None:
         return None, "text_only", ["Airspace has no AirspaceVolume geometry."]
-    surface = _first_descendant(volume, "Surface")
-    if surface is None:
+    surfaces = [element for element in volume.iter() if _local_name(element.tag) == "Surface"]
+    if not surfaces:
         return None, "text_only", ["Airspace volume has no horizontal projection surface."]
 
-    ring = []
-    for segment in surface.iter():
+    polygons = []
+    warnings = []
+    for surface in surfaces:
+        surface_polygons, surface_warnings = _surface_polygons(surface)
+        polygons.extend(surface_polygons)
+        warnings.extend(surface_warnings)
+
+    if not polygons:
+        return None, "text_only", warnings or ["Airspace geometry could not be converted to a polygon."]
+    if len(polygons) == 1:
+        return f"POLYGON {_polygon_wkt_body(polygons[0])}", "aixm_polygon", warnings
+    return "MULTIPOLYGON (" + ", ".join(_polygon_wkt_body(polygon) for polygon in polygons) + ")", "aixm_multipolygon", warnings
+
+
+def _surface_polygons(surface) -> tuple[list[list[list[tuple[float, float]]]], list[str]]:
+    warnings = []
+    polygons = []
+    patches = [element for element in surface.iter() if _local_name(element.tag) == "PolygonPatch"]
+    if not patches:
+        patches = [surface]
+
+    for patch in patches:
+        exterior_rings, exterior_warnings = _boundary_rings(patch, "exterior")
+        interior_rings, interior_warnings = _boundary_rings(patch, "interior")
+        warnings.extend(exterior_warnings)
+        warnings.extend(interior_warnings)
+        if not exterior_rings:
+            fallback_ring, fallback_warnings = _ring_points(patch)
+            warnings.extend(fallback_warnings)
+            if fallback_ring:
+                exterior_rings = [fallback_ring]
+        if not exterior_rings:
+            warnings.append("AIXM surface has no convertible exterior ring.")
+            continue
+        for index, exterior_ring in enumerate(exterior_rings):
+            polygons.append([exterior_ring] + (interior_rings if index == 0 else []))
+
+    return polygons, warnings
+
+
+def _boundary_rings(parent, boundary_name: str) -> tuple[list[list[tuple[float, float]]], list[str]]:
+    rings = []
+    warnings = []
+    for boundary in parent.iter():
+        if _local_name(boundary.tag) != boundary_name:
+            continue
+        ring_elements = [element for element in boundary.iter() if _local_name(element.tag) in {"Ring", "LinearRing"}]
+        if not ring_elements:
+            ring_elements = [boundary]
+        for ring_element in ring_elements:
+            ring, ring_warnings = _ring_points(ring_element)
+            warnings.extend(ring_warnings)
+            if ring:
+                rings.append(ring)
+    return rings, warnings
+
+
+def _ring_points(ring_element) -> tuple[list[tuple[float, float]], list[str]]:
+    points = []
+    warnings = []
+    handled_segments = []
+    unsupported_segments = set()
+    for segment in ring_element.iter():
         segment_name = _local_name(segment.tag)
         if segment_name in {"GeodesicString", "LineStringSegment"}:
-            ring.extend(_segment_points(segment))
+            handled_segments.append(segment)
+            points.extend(_segment_points(segment))
         elif segment_name == "CircleByCenterPoint":
-            ring.extend(_circle_points(segment))
+            handled_segments.append(segment)
+            points.extend(_circle_points(segment))
         elif segment_name == "ArcByCenterPoint":
-            ring.extend(_arc_points(segment))
+            handled_segments.append(segment)
+            points.extend(_arc_points(segment))
+        elif segment_name.endswith("Segment") or segment_name in {"ArcString", "ArcStringByBulge", "Clothoid"}:
+            unsupported_segments.add(segment_name)
 
-    ring = _dedupe_adjacent(ring)
+    if not handled_segments:
+        points.extend(_segment_points(ring_element))
+
+    for segment_name in sorted(unsupported_segments):
+        warnings.append(f"Unsupported AIXM geometry segment '{segment_name}' was skipped.")
+
+    ring = _dedupe_adjacent(points)
     if len(ring) < 3:
-        return None, "text_only", ["Airspace geometry could not be converted to a polygon."]
+        return [], warnings
     if ring[0] != ring[-1]:
         ring.append(ring[0])
+    return ring, warnings
+
+
+def _polygon_wkt_body(rings: list[list[tuple[float, float]]]) -> str:
+    return "(" + ", ".join(_ring_wkt(ring) for ring in rings) + ")"
+
+
+def _ring_wkt(ring: list[tuple[float, float]]) -> str:
     coords = ", ".join(f"{lon:.8f} {lat:.8f}" for lat, lon in ring)
-    return f"POLYGON (({coords}))", "aixm_polygon", []
+    return f"({coords})"
 
 
 def _segment_points(segment) -> list[tuple[float, float]]:
     points = []
     for pos in segment.iter():
-        if _local_name(pos.tag) == "pos":
+        local_name = _local_name(pos.tag)
+        if local_name == "pos":
             point = _parse_pos(pos.text)
             if point:
                 points.append(point)
+        elif local_name == "posList":
+            points.extend(_parse_pos_list(pos.text))
     return points
 
 
@@ -373,14 +462,32 @@ def _parse_pos(raw: str | None) -> tuple[float, float] | None:
         return None
 
 
+def _parse_pos_list(raw: str | None) -> list[tuple[float, float]]:
+    parts = (raw or "").split()
+    if len(parts) < 4 or len(parts) % 2:
+        return []
+    points = []
+    for index in range(0, len(parts), 2):
+        try:
+            points.append((float(parts[index]), float(parts[index + 1])))
+        except ValueError:
+            return []
+    return points
+
+
 def _radius_nm(element) -> float | None:
     radius = _float_child(element, "radius")
     if radius is None:
         return None
     radius_node = _first_child(element, "radius")
     uom = (radius_node.attrib.get("uom") if radius_node is not None else "") or ""
-    if "m" == uom.lower():
+    normalized_uom = uom.strip().upper()
+    if normalized_uom in {"M", "METRE", "METRES", "METER", "METERS"}:
         return radius / 1852.0
+    if normalized_uom in {"KM", "KILOMETRE", "KILOMETRES", "KILOMETER", "KILOMETERS"}:
+        return radius * 1000.0 / 1852.0
+    if normalized_uom in {"FT", "FOOT", "FEET"}:
+        return radius / 6076.12
     return radius
 
 

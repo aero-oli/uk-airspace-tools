@@ -8,8 +8,11 @@ This is a QGIS Python plugin. Pure parser tests run with normal Python, but QGIS
 
 Run the pure-Python test suite from the repository root:
 
-```bash
+```powershell
+python -m ruff check .
+.\scripts\build-plugin-zip.ps1
 python -m unittest discover uk_airspace_tools/tests
+python -m compileall -q uk_airspace_tools
 ```
 
 For local QGIS development, link the `uk_airspace_tools` folder into your active QGIS profile's `python/plugins` directory and use the QGIS Plugin Reloader plugin after edits.
@@ -19,7 +22,7 @@ For local QGIS development, link the `uk_airspace_tools` folder into your active
 - Keep source data assumptions explicit.
 - Add or update tests for parsers, filters, or schema changes.
 - Do not commit generated GeoPackage caches, QGIS projects, release zips, or `__pycache__` folders.
-- Manually test QGIS UI changes where practical.
+- Manually test QGIS UI changes where practical using `docs/QGIS_TESTING.md`.
 - Preserve the operational warning: this plugin is not a substitute for official briefing or regulatory checks.
 
 ## Coding Style
@@ -28,3 +31,4 @@ For local QGIS development, link the `uk_airspace_tools` folder into your active
 - Keep QGIS/PyQt imports guarded so pure-Python tests still run outside QGIS.
 - Keep data providers separate from QGIS layer/presentation code.
 - Use clear names for aviation fields and preserve raw source values when parsing is ambiguous.
+- See `docs/ARCHITECTURE.md` for the provider/parser/cache/layer boundaries.
